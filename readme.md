@@ -59,7 +59,7 @@ The address will be automatically set to default billing and shipping address. T
 
 ### Speed comparison
 
-Compared to the [Magento-way of creating customers programmatically](http://inchoo.net/magento/programming-magento/programmaticaly-adding-new-customers-to-the-magento-store/comment-page-1/) 
+Compared to the [Magento-way of creating customers programmatically](http://inchoo.net/magento/programming-magento/programmaticaly-adding-new-customers-to-the-magento-store/) 
 the speed of importing is at least 10 times (or even more) faster. This is because instead of doing it with Magento, the
 customers are imported directly into the database.
 
