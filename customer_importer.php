@@ -53,6 +53,11 @@ class CustomerImporter
     private $queryCreateAddress;
 
     /**
+     * @var $isUpdate bool
+     */
+    private $isUpdate;
+
+    /**
      * Constructor
      */
     public function __construct()
@@ -89,16 +94,19 @@ class CustomerImporter
         $this->attributes = array(
             'customer' => array(
                 'firstname' => $this->getMagentoAttributeId('firstname', 1),
+                'middlename' => $this->getMagentoAttributeId('middlename', 1),
                 'lastname' => $this->getMagentoAttributeId('lastname', 1),
                 'dob' => $this->getMagentoAttributeId('dob', 1),
                 'prefix' => $this->getMagentoAttributeId('prefix', 1),
                 'gender' => $this->getMagentoAttributeId('gender', 1),
                 'default_billing' => $this->getMagentoAttributeId('default_billing', 1),
                 'default_shipping' => $this->getMagentoAttributeId('default_shipping', 1),
-                'password_hash' => $this->getMagentoAttributeId('password_hash', 1)
+                'password_hash' => $this->getMagentoAttributeId('password_hash', 1),
+                'initials' => $this->getMagentoAttributeId('initials', 1),
             ),
             'address' => array(
                 'firstname' => $this->getMagentoAttributeId('firstname', 2),
+                'middlename' => $this->getMagentoAttributeId('middlename', 2),
                 'lastname' => $this->getMagentoAttributeId('lastname', 2),
                 'prefix' => $this->getMagentoAttributeId('prefix', 2),
                 'country_id' => $this->getMagentoAttributeId('country_id', 2),
@@ -128,24 +136,34 @@ class CustomerImporter
      * Import a single customer
      * 
      * @param $customerData
+     * @param bool|int $updateId    If set, update the customer with the specific ID
      *
      * @return int|bool
      */
-    public function import($customerData)
+    public function import($customerData, $updateId)
     {
         // Execute the query, effectively importing the customer:
-        $result = $this->queryCreateCustomer->execute(
-            array(
-                ':website_id' => $customerData['website_id'],
-                ':email' => $customerData['email'],
-                ':group_id' => $customerData['group_id'],
-                ':store_id' => $customerData['store_id']
-            )
-        );
+        if($updateId === false)
+        {
+            $result = $this->queryCreateCustomer->execute(
+                array(
+                    ':website_id' => $customerData['website_id'],
+                    ':email' => $customerData['email'],
+                    ':group_id' => $customerData['group_id'],
+                    ':store_id' => $customerData['store_id']
+                )
+            );
+            $this->isUpdate = false;
+        } else {
+            $result = true;
+            $this->isUpdate = true;
+        }
+        
+        // Import attributes and address:
         if($result === true)
         {
             // Get customer ID:
-            $customerID = $this->pdoMagento->lastInsertId();
+            $customerID = $updateId === false ? $this->pdoMagento->lastInsertId() : $updateId;
             
             // Store attributes:
             $this->storeCustomerAttribute($customerID, 'firstname', $customerData['firstname']);
@@ -159,17 +177,35 @@ class CustomerImporter
             if(isset($customerData['gender'])) { 
                 $this->storeCustomerAttribute($customerID, 'gender', $customerData['gender']); 
             }
+            if(isset($customerData['initials']))
+            {
+                $this->storeCustomerAttribute($customerID, 'initials', $customerData['initials']);
+            }
+            if(isset($customerData['middlename']))
+            {
+                $this->storeCustomerAttribute($customerID, 'middlename', $customerData['middlename']);
+            }
             
             // Create address:
-            $result = $this->queryCreateAddress->execute(
-                array(
-                    ':parent_id' => $customerID
-                )
-            );
+            if(!$this->isUpdate)
+            {
+                $result = $this->queryCreateAddress->execute(
+                    array(
+                        ':parent_id' => $customerID
+                    )
+                );
+            } else {
+                $addressID = $this->getPreferredAddressId($customerID);
+                $result    = $addressID !== false;
+            }
+            
             if($result === true)
             {
                 // Get address ID:
-                $addressID = $this->pdoMagento->lastInsertId();
+                if(!$this->isUpdate)
+                {
+                    $addressID = $this->pdoMagento->lastInsertId();
+                }
                 
                 // Store attributes:
                 $this->storeAddressAttribute($addressID, 'firstname', $customerData['firstname']);
@@ -218,16 +254,35 @@ class CustomerImporter
      */
     private function storeCustomerAttribute($customerId, $key, $value)
     {
-        $this->pdoMagento->query(
-            sprintf(
-                'INSERT INTO `customer_entity_%1$s` (`entity_type_id`, `attribute_id`, `entity_id`, `value`)
-                VALUES (1, %2$d, %3$d, \'%4$s\')',
-                $this->attributes['customer'][$key]['type'],
-                $this->attributes['customer'][$key]['id'],
-                $customerId,
-                addslashes($value)
-            )
-        );
+        if(!$this->checkIfAttributeExists(
+            $customerId,
+            1,
+            $this->attributes['customer'][$key]['id'],
+            'customer_entity_' . $this->attributes['customer'][$key]['type'])
+        )
+        {
+            $this->pdoMagento->query(
+                sprintf(
+                    'INSERT INTO `customer_entity_%1$s` (`entity_type_id`, `attribute_id`, `entity_id`, `value`)
+                    VALUES (1, %2$d, %3$d, \'%4$s\')',
+                    $this->attributes['customer'][$key]['type'],
+                    $this->attributes['customer'][$key]['id'],
+                    $customerId,
+                    addslashes($value)
+                )
+            );
+        } else {
+            $this->pdoMagento->query(
+                sprintf(
+                    'UPDATE `customer_entity_%1$s` SET `value` = \'%4$s\' WHERE 
+                    `entity_id` = %3$d AND `entity_type_id` = 1 AND `attribute_id` = %2$d;',
+                    $this->attributes['customer'][$key]['type'],
+                    $this->attributes['customer'][$key]['id'],
+                    $customerId,
+                    addslashes($value)
+                )
+            );
+        }
     }
 
     /**
@@ -239,18 +294,62 @@ class CustomerImporter
      */
     private function storeAddressAttribute($addressId, $key, $value)
     {
-        $this->pdoMagento->query(
-            sprintf(
-                'INSERT INTO `customer_address_entity_%1$s` (`entity_type_id`, `attribute_id`, `entity_id`, `value`)
-                VALUES (2, %2$d, %3$d, \'%4$s\')',
-                $this->attributes['address'][$key]['type'],
-                $this->attributes['address'][$key]['id'],
-                $addressId,
-                addslashes($value)
-            )
-        );
+        if(!$this->checkIfAttributeExists(
+            $addressId, 
+            2, 
+            $this->attributes['address'][$key]['id'], 
+            'customer_address_entity_' . $this->attributes['address'][$key]['type'])
+        )
+        {
+            $this->pdoMagento->query(
+                sprintf(
+                    'INSERT INTO `customer_address_entity_%1$s` (`entity_type_id`, `attribute_id`, `entity_id`, `value`)
+                    VALUES (2, %2$d, %3$d, \'%4$s\')',
+                    $this->attributes['address'][$key]['type'],
+                    $this->attributes['address'][$key]['id'],
+                    $addressId,
+                    addslashes($value)
+                )
+            );
+        } else {
+            $this->pdoMagento->query(
+                sprintf(
+                    'UPDATE `customer_address_entity_%1$s` SET `value` = \'%4$s\' WHERE 
+                        `entity_id` = %3$d AND `entity_type_id` = 2 AND `attribute_id` = %2$d;',
+                    $this->attributes['address'][$key]['type'],
+                    $this->attributes['address'][$key]['id'],
+                    $addressId,
+                    addslashes($value)
+                )
+            );
+        }
     }
 
+    /**
+     * @param $entityId
+     * @param $entityTypeId
+     * @param $attributeId
+     * @param $tableName
+     *
+     * @return bool
+     */
+    private function checkIfAttributeExists($entityId, $entityTypeId, $attributeId, $tableName)
+    {
+        $checkQuery = $this->pdoMagento->prepare(
+            'SELECT `value` FROM :table_name WHERE `entity_id` = :entity_id AND 
+                `entity_type_id` = :entity_type_id AND `attribute_id` = :attribute_id'
+        );
+        $checkQuery->execute(
+            array(
+                ':table_name' => $tableName,
+                ':entity_id' => $entityId,
+                ':entity_type_id' => $entityTypeId,
+                ':attribute_id' => $attributeId
+            )
+        );
+        return $checkQuery->rowCount() > 0;
+    }
+    
     /**
      * Get Magento attribute ID
      *
@@ -275,5 +374,28 @@ class CustomerImporter
         } else {
             throw new Exception('Cannot find Magento attribute: ' . $code . ' (' . $entityTypeId . ')');
         }
+    }
+
+    /**
+     * @param $customerID
+     * 
+     * @return bool|int
+     */
+    private function getPreferredAddressId($customerID)
+    {
+        $addressQuery = $this->pdoMagento->prepare('
+            SELECT `value` FROM `customer_entity_int` WHERE `entity_id` = :customer_id AND 
+            `attribute_id` = :attribute_id;');
+        $data = array(
+            ':customer_id' => $customerID,
+            ':attribute_id' => $this->attributes['customer']['default_billing']['id']
+        ); 
+        $addressQuery->execute($data);
+        if($addressQuery->rowCount() == 1)
+        {
+            $row = $addressQuery->fetch(PDO::FETCH_ASSOC);
+            return (int) $row['value'];
+        }
+        return false;
     }
 }
